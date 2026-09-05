@@ -261,8 +261,8 @@ class CertificateExtractor:
         """Convert certificate dict to PEM format."""
         # This is a simplified conversion
         # In production, use cryptography library
-        subject = dict(x[0] for x in cert_dict.get('subject', ()))
-        issuer = dict(x[0] for x in cert_dict.get('issuer', ()))
+        subject = dict(x for x in cert_dict.get('subject', ()))
+        issuer = dict(x for x in cert_dict.get('issuer', ()))
 
         pem_lines = [
             "-----BEGIN CERTIFICATE-----",
@@ -293,8 +293,8 @@ class CertificateExtractor:
                     cert_der = ssock.getpeercert(binary_form=True)
 
                     if cert:
-                        subject = dict(x[0] for x in cert.get('subject', ()))
-                        issuer = dict(x[0] for x in cert.get('issuer', ()))
+                        subject = dict(x for x in cert.get('subject', ()))
+                        issuer = dict(x for x in cert.get('issuer', ()))
                         certs.append({
                             'subject': subject.get('commonName', 'unknown'),
                             'issuer': issuer.get('commonName', 'unknown'),
@@ -471,7 +471,7 @@ class TrustStoreManager:
 
                     print(f"  [+] Connection successful")
                     if cert:
-                        subject = dict(x[0] for x in cert.get('subject', ()))
+                        subject = dict(x for x in cert.get('subject', ()))
                         print(f"  Subject: {subject.get('commonName', 'unknown')}")
                     if cipher:
                         print(f"  Cipher: {cipher[0]}")
@@ -531,8 +531,8 @@ class CertificateValidator:
                 pass
 
         # Check for self-signed
-        subject = dict(x[0] for x in cert_dict.get('subject', ()))
-        issuer = dict(x[0] for x in cert_dict.get('issuer', ()))
+        subject = dict(x for x in cert_dict.get('subject', ()))
+        issuer = dict(x for x in cert_dict.get('issuer', ()))
         if subject.get('commonName') == issuer.get('commonName'):
             issues.append("Certificate appears to be self-signed")
 
