@@ -15,6 +15,7 @@ import json
 import struct
 import base64
 import tempfile
+import argparse
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -570,79 +571,226 @@ def create_test_server():
     return test_cert
 
 
+class PinningPresenceScanner:
+    """Fixture-based detection of certificate-pinning mechanisms in source-like fixtures."""
+
+    PINNING_SIGNATURES = [
+        (r"CertificatePinner(?:\s*\.\s*Builder)?", "OkHttp CertificatePinner"),
+        (r"sha256/\S+", "SHA-256 public-key / cert pin literal"),
+        (r"ssl\.pinning|certificate_pinning|sslpinning", "Explicit pinning keyword"),
+        (r"X509TrustManager", "Custom TrustManager"),
+        (r"checkServerTrusted", "Server trust check (pinning candidate)"),
+        (r"getAcceptedIssuers", "TrustManager implementation"),
+        (r"HostnameVerifier", "Custom hostname verifier"),
+        (r"TrustManager\[\]\s*\{(\.\.\.)?\s*\}", "Disabling TrustManager array"),
+        (r"STRICT_TRUST", "Strict trust mode"),
+        (r"PinningTrustStrategy", "Pinning trust strategy"),
+        (r"trustAnchor|anchors[:=]", "Trust anchor handling"),
+        (r"certificatePins\s*[:=]", "Pinned certificate map"),
+        (r"kSecPolicySSL|SecTrustSetAnchorCertificates", "iOS certificate pinning"),
+        (r"NSExceptionRequiresForwardSecrecy", "ATS forward-secrecy setting"),
+    ]
+
+    # Tokens that indicate *weakened* trust handling (negative findings)
+    WEAK_TOKENS = [
+        ("ALLOW_ALL_TRUST", "hostname verifier accepting all hosts"),
+        (r"setHostnameVerifier\s*\(\s*new\s+\w+\s*\(\s*unsafe", "unsafe hostname verifier"),
+        (r"TrustAllCerts", "trust-all certificate manager"),
+        (r"SSLCertificateSocketFactory\.ALLOW_ALL", "allow-all cert socket factory"),
+        (r"checkServerTrusted\s*\(\s*[^)]*\)\s*\{\s*\}", "empty trust-check body"),
+    ]
+
+    def __init__(self):
+        self.findings = []
+
+    def scan_text(self, text):
+        """Scan one source/text blob for pinning indicators."""
+        hits = []
+        for pattern, desc in self.PINNING_SIGNATURES:
+            import re
+            for m in re.finditer(pattern, text, re.IGNORECASE):
+                hits.append({"indicator": m.group(0)[:80], "description": desc,
+                             "offset": m.start(), "type": "pin_presence"})
+        for token, desc in self.WEAK_TOKENS:
+            if re.search(token, text, re.IGNORECASE):
+                hits.append({"indicator": token, "description": desc,
+                             "offset": -1, "type": "weak_trust"})
+        return hits
+
+    def scan_file(self, path):
+        """Scan a file; returns per-file findings."""
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        hits = self.scan_text(text)
+        result = {"file": os.path.basename(path), "hits": hits}
+        self.findings.append(result)
+        return result
+
+    def summarize(self, results):
+        """Classify each fixture blob as pinned / weak / clean."""
+        out = []
+        for r in results:
+            pins = [h for h in r["hits"] if h["type"] == "pin_presence"]
+            weak = [h for h in r["hits"] if h["type"] == "weak_trust"]
+            verdict = "PINNED" if pins and not weak else ("WEAK_TRUST" if weak else "NO_PINNING")
+            out.append({"file": r["file"], "verdict": verdict, "findings": r["hits"]})
+        return out
+
+
+def create_pinning_fixtures(fixtures_dir):
+    """Create static source fixtures that exercise the presence scanner."""
+    os.makedirs(fixtures_dir, exist_ok=True)
+
+    pinned = """package com.lab.app.net;
+import okhttp3.CertificatePinner;
+public class SecureApi {
+    static final String HOST = "api.lab.example.com";
+    public static CertificatePinner build() {
+        return new CertificatePinner.Builder()
+            .add(HOST, "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+            .add(HOST, "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=")
+            .build();
+    }
+}
+"""
+
+    weak = """package com.lab.app.net;
+import javax.net.ssl.X509TrustManager;
+public class OpenApi {
+    public X509TrustManager get() {
+        return new X509TrustManager() {
+            public void checkServerTrusted(java.security.cert.X509Certificate[] c, String a) {}
+            public void checkClientTrusted(java.security.cert.X509Certificate[] c, String a) {}
+            public java.security.cert.X509Certificate[] getAcceptedIssuers() { return new java.security.cert.X509Certificate[0]; }
+        };
+    }
+}
+"""
+
+    clean = """package com.lab.app.net;
+import java.security.SecureRandom;
+public class CryptoFile {
+    public byte[] hash(byte[] in) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        return md.digest(in);
+    }
+}
+"""
+
+    marker = """// lab fixture: pinning presence detection corpus
+constexpr auto kLabC2 = "https://c2.lab.example.com/beacon";
+constexpr const char* kPinnedPin = "sha256/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=";
+"""
+
+    files = {"pinned_okhttp.java": pinned,
+             "weak_trustmanager.java": weak,
+             "clean_crypto.java": clean,
+             "marker_strings.cpp": marker}
+    created = {}
+    for name, content in files.items():
+        path = os.path.join(fixtures_dir, name)
+        with open(path, "w") as f:
+            f.write(content)
+        created[name] = path
+    return created
+
+
+def run_demo(report_dir="reports"):
+    """Offline demo: scan pinning fixtures, write JSON. Returns exit code."""
+    os.makedirs(report_dir, exist_ok=True)
+    fixtures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+    create_pinning_fixtures(fixtures_dir)
+    scanner = PinningPresenceScanner()
+    results = [scanner.scan_file(os.path.join(fixtures_dir, name))
+               for name in sorted(os.listdir(fixtures_dir))]
+    summary = scanner.summarize(results)
+    report = {"fixture_dir": fixtures_dir, "results": summary}
+    out = os.path.join(report_dir, "mo3_demo_report.json")
+    with open(out, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"[*] JSON report: {out}")
+    for entry in summary:
+        print(f"[*] {entry['file']:<24} → {entry['verdict']} "
+              f"({len(entry['findings'])} indicators)")
+    return 0
+
+
 def main():
-    """Main entry point."""
-    print("=" * 60)
-    print("  MO3 — Certificate Pinning Bypass Tool")
-    print("=" * 60)
+    parser = argparse.ArgumentParser(
+        prog="cert_pin_analyzer",
+        description="MO3 — Certificate pinning analyzer (TLS inspector + static presence scan).")
+    sub = parser.add_subparsers(dest="command")
 
-    if len(sys.argv) < 2:
-        print("\nUsage: python3 cert_pin_analyzer.py <command> [options]")
-        print("\nCommands:")
-        print("  detect <hostname>     - Detect SSL pinning")
-        print("  extract <hostname>    - Extract certificate")
-        print("  proxy <host> <port>   - Configure proxy")
-        print("  trust <cert_path>     - Add to trust store")
-        print("  analyze <hostname>    - Analyze certificate")
-        print("\nRunning demo mode...")
+    p_scan = sub.add_parser("scan-fixture", help="scan a source fixture for pinning presence")
+    p_scan.add_argument("paths", nargs="+", help="source files to scan")
 
-        # Demo mode
+    p_https = sub.add_parser("tls", help="inspect a live TLS endpoint")
+    p_https.add_argument("host", help="hostname (use a lab host you own)")
+    p_https.add_argument("--port", type=int, default=443)
+
+    p_cert = sub.add_parser("cert-info", help="dump certificate details from a live endpoint")
+    p_cert.add_argument("host", help="hostname")
+    p_cert.add_argument("--port", type=int, default=443)
+
+    sub.add_parser("demo", help="offline fixture-based pinning detection demo")
+
+    parser.add_argument("--json", action="store_true", help="write JSON report to reports/")
+    parser.add_argument("--report-dir", default="reports", help="report dir (default: reports)")
+    parser.add_argument("--make-fixture", action="store_true",
+                        help="generate fixtures and exit")
+    args = parser.parse_args()
+
+    if args.make_fixture:
+        fixtures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+        create_pinning_fixtures(fixtures_dir)
+        print(f"[*] Fixtures written to {fixtures_dir}")
+        return 0
+
+    if not args.command:
+        return run_demo(args.report_dir)
+
+    if args.command == "demo":
+        return run_demo(args.report_dir)
+
+    if args.command == "scan-fixture":
+        scanner = PinningPresenceScanner()
+        results = []
+        for p in args.paths:
+            if not os.path.exists(p):
+                print(f"[!] Missing: {p}")
+                return 2
+            results.append(scanner.scan_file(p))
+        summary = scanner.summarize(results)
+        for entry in summary:
+            print(f"[*] {entry['file']:<28} → {entry['verdict']}")
+            for h in entry["findings"]:
+                print(f"      [{h['description']}] {h['indicator']}")
+        if args.json:
+            os.makedirs(args.report_dir, exist_ok=True)
+            out = os.path.join(args.report_dir, "mo3_scan.json")
+            with open(out, "w") as f:
+                json.dump(summary, f, indent=2)
+            print(f"[*] JSON report: {out}")
+        return 0
+
+    if args.command in ("tls", "cert-info"):
         detector = SSLPinningDetector()
-        detector.print_report()
+        if args.command == "tls":
+            result = detector.check_host(args.host, args.port)
+            detector.print_report()
+        else:
+            result = detector.analyze_certificate(args.host, args.port)
+        if args.json:
+            os.makedirs(args.report_dir, exist_ok=True)
+            out = os.path.join(args.report_dir, f"mo3_{args.command}_{args.host}.json")
+            with open(out, "w") as f:
+                json.dump({"host": args.host, "port": args.port, "result": result},
+                          f, indent=2, default=str)
+            print(f"[*] JSON report: {out}")
+        return 0
 
-        configurator = ProxyConfigurator()
-        configurator.generate_proxy_config('127.0.0.1', '8080')
-
-        trust_manager = TrustStoreManager()
-        trust_manager.print_trust_store()
-
-        validator = CertificateValidator()
-        test_cert = create_test_server()
-        issues = validator.check_weakness(test_cert)
-        print(f"\n  Certificate Issues Found: {len(issues)}")
-        for issue in issues:
-            print(f"    - {issue}")
-
-        return
-
-    command = sys.argv[1]
-
-    if command == 'detect' and len(sys.argv) >= 3:
-        hostname = sys.argv[2]
-        port = int(sys.argv[3]) if len(sys.argv) > 3 else 443
-        detector = SSLPinningDetector()
-        detector.check_host(hostname, port)
-        detector.print_report()
-
-    elif command == 'extract' and len(sys.argv) >= 3:
-        hostname = sys.argv[2]
-        port = int(sys.argv[3]) if len(sys.argv) > 3 else 443
-        extractor = CertificateExtractor()
-        extractor.extract_cert(hostname, port)
-
-    elif command == 'proxy' and len(sys.argv) >= 4:
-        proxy_host = sys.argv[2]
-        proxy_port = sys.argv[3]
-        configurator = ProxyConfigurator()
-        configurator.test_proxy(proxy_host, int(proxy_port))
-        configurator.generate_proxy_config(proxy_host, proxy_port)
-
-    elif command == 'trust' and len(sys.argv) >= 3:
-        cert_path = sys.argv[2]
-        trust_manager = TrustStoreManager()
-        trust_manager.add_trusted_cert(cert_path)
-        trust_manager.print_trust_store()
-
-    elif command == 'analyze' and len(sys.argv) >= 3:
-        hostname = sys.argv[2]
-        port = int(sys.argv[3]) if len(sys.argv) > 3 else 443
-        detector = SSLPinningDetector()
-        detector.analyze_certificate(hostname, port)
-
-    else:
-        print(f"[!] Unknown command: {command}")
-        print("Run without arguments for help")
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

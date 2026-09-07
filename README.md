@@ -1,127 +1,96 @@
-# MO3 — Certificate Pinning Bypass
+# MO3 — Certificate Pinning Analyzer
 
-SSL pinning detection, certificate extraction, proxy configuration, and trust store manipulation tools.
+TLS connection inspector plus fixture-based pinning-presence detection.
+Standard-library only.
 
-## Overview
+## What the engine genuinely does
 
-This tool assists with SSL/TLS certificate pinning analysis and bypass techniques:
-- Detect SSL pinning implementations
-- Extract and analyze certificates
-- Configure proxy settings for MITM analysis
-- Manage custom trust stores
-- Validate certificate chains
+- **TLS connection inspector** — connects to a host with the platform `ssl`
+  module, reads the peer certificate chain, computes SHA-256/SHA-1/MD5
+  fingerprints, tests verified vs. permissive connections, and inspects cert
+  subject/issuer/SAN/validity.
+- **Static presence scan** — regex-based detector over source-like fixtures for
+  `CertificatePinner`, `X509TrustManager`, `TrustManager[] {}`, `sha256/` pins,
+  `HostnameVerifier`, iOS `SecTrust` calls, and weakening patterns
+  (`TrustAllCerts`, empty `checkServerTrusted`, ALLOW_ALL_TRUST).
+- **Verdict classification** — each fixture becomes `PINNED`, `WEAK_TRUST`, or
+  `NO_PINNING`.
+- **Trust store / proxy tooling** — add/remove trusted certs, build custom SSL
+  contexts, generate proxy guidance.
+- **CertificateValidator** — weak-signature, self-signed, expiry checks.
 
-## Features
-
-- **SSL Pinning Detection**: Test hosts for pinning indicators
-- **Certificate Extraction**: Save certificates in PEM/DER formats
-- **Certificate Analysis**: Check for weaknesses and pin values
-- **Proxy Configuration**: Generate configs for various tools
-- **Trust Store Management**: Add/remove custom CA certificates
-- **Certificate Validation**: Check for weak algorithms and expiry
-
-## Installation
-
-```bash
-# No external dependencies required - uses standard library only
-python3 cert_pin_analyzer.py <command> [options]
-```
-
-## Usage
+## Quick start
 
 ```bash
-# Detect SSL pinning
-python3 cert_pin_analyzer.py detect example.com
-
-# Extract certificate
-python3 cert_pin_analyzer.py extract example.com
-
-# Configure proxy
-python3 cert_pin_analyzer.py proxy 127.0.0.1 8080
-
-# Add certificate to trust store
-python3 cert_pin_analyzer.py trust /path/to/cert.pem
-
-# Analyze certificate
-python3 cert_pin_analyzer.py analyze example.com
-
-# Run demo mode
+# Offline demo (scans fixtures/, writes reports/, exit 0)
 python3 cert_pin_analyzer.py
+
+# Scan source fixtures for pinning presence
+python3 cert_pin_analyzer.py scan-fixture fixtures/*.java --json
+
+# TLS section inspection (lab host you own)
+python3 cert_pin_analyzer.py tls api.lab.example.com --port 443
+python3 cert_pin_analyzer.py cert-info api.lab.example.com
+
+# Rebuild fixtures
+python3 cert_pin_analyzer.py --make-fixture
+
+# Tests
+python3 -m unittest discover -s tests
 ```
 
-## Example Output
+## CLI
 
 ```
-============================================================
-  MO3 — Certificate Pinning Bypass Tool
-============================================================
-
-[*] Testing SSL pinning on example.com:443
-
-============================================================
-  MO3 — SSL Pinning Detection Report
-============================================================
-
-  Host: example.com:443
-  Connection Possible: True
-  Certificate Chain Length: 3
-  Pinning Detected: Unlikely
-
-============================================================
-  Proxy Configuration Guide
-============================================================
-
-  Proxy URL: http://127.0.0.1:8080
-
-  Environment Variables:
-    export HTTP_PROXY=http://127.0.0.1:8080
-    export HTTPS_PROXY=http://127.0.0.1:8080
-
-  Python requests:
-    proxies = {
-        'http': 'http://127.0.0.1:8080',
-        'https': 'http://127.0.0.1:8080',
-    }
+python3 cert_pin_analyzer.py [-h] [--json] [--report-dir REPORT_DIR]
+                             [--make-fixture]
+                             {scan-fixture,tls,cert-info,demo} ...
 ```
 
-## Legal Disclaimer
+- `scan-fixture <paths...>` — static pinning-presence scan over fixtures.
+- `tls <host> [--port]` — live TLS inspection.
+- `cert-info <host> [--port]` — live certificate detail dump.
+- `demo` — offline fixture corpus scan (default when no command given).
+- `--json` — write JSON to `reports/`.
+- `--make-fixture` — regenerate `fixtures/`.
 
-**IMPORTANT: Read before use.**
+Exit codes: `0` success (incl. demo), `2` usage/input error.
 
-This project is provided for **educational and authorized security testing purposes only**. 
+## Live Lab Test Plan
 
-### Authorization Requirements
-- You MUST have explicit written permission from the network owner before using this tool
-- Unauthorized interception of network communications is illegal under federal and state laws
-- This tool should ONLY be used on networks you own or have written authorization to test
+Prerequisites: an endpoint you own (or the offline fixtures). For live checks use
+your lab host, never third-party infrastructure without authorization.
 
-### Legal Framework
-- **Computer Fraud and Abuse Act (CFAA)**: Unauthorized access to computer systems is a federal crime
-- **Wiretap Act (18 U.S.C. § 2511)**: Interception of electronic communications without consent is illegal
-- **State Laws**: Many states have additional computer crime and wiretapping statutes
-- **GDPR/CCPA**: Data collection may be subject to privacy regulations
+1. **Baseline**: `python3 cert_pin_analyzer.py demo` — confirm 4 fixtures classify
+   as PINNED / WEAK_TRUST / NO_PINNING deterministically.
+2. **Static recall**: decompile an app you're authorized to assess (jadx/apktool)
+   and run `scan-fixture` over the produced sources. Confirm pinning indicators
+   match a manual grep for `CertificatePinner` / `X509TrustManager`.
+3. **Live inspection**: stand up a lab TLS server (self-signed is fine) and run
+   `tls <lab-host>`; verify fingerprints against `openssl x509 -fingerprint`.
+4. **Negative test**: confirm `clean_crypto.java` stays `NO_PINNING` to bound
+   false positives.
+5. **Regression**: re-run `python3 -m unittest discover -s tests`.
 
-### Acceptable Use
-- Testing security of your own networks
-- Authorized penetration testing with written scope
-- Academic research in controlled lab environments
-- Security education and training
+## Metrics
 
-### Prohibited Use
-- Intercepting communications on networks you do not own
-- Attacking infrastructure without authorization
-- Any activity that violates applicable laws or regulations
-- Commercial use without proper licensing
+| Metric                         | Value |
+|--------------------------------|-------|
+| Standard-library only          | Yes   |
+| Third-party deps               | none  |
+| Deterministic offline tests    | 9     |
+| Static pinning indicators      | 13 + 5 weak tokens |
+| Offline demo exit              | 0     |
+| Report output                  | `reports/*.json` (gitignored) |
+| Live mode                      | `tls` / `cert-info` on lab hosts |
 
-### No Warranty
-This software is provided "AS IS" without warranty of any kind. The author is not responsible for any misuse or damage caused by this software.
+## IMPORTANT: Read before use.
 
-### Responsible Disclosure
-If you discover vulnerabilities using this tool, follow responsible disclosure practices:
-1. Report to the vendor/owner privately
-2. Allow reasonable time for remediation
-3. Do not exploit beyond proof of concept
+Educational, authorization-required tooling. See `LICENSE` for the full shield —
+Authorization, CFAA / computer-crime statutes, Acceptable Use, Prohibited Use,
+No Warranty, and Responsible Disclosure. Only test TLS endpoints you own or are
+explicitly authorized to assess.
 
 ## License
 
-MIT
+MIT — full legal shield in `LICENSE`.
